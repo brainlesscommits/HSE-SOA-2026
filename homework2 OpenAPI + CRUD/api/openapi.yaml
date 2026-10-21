@@ -1,0 +1,545 @@
+openapi: 3.0.3
+info:
+  title: Marketplace API
+  version: 1.0.0
+  description: |
+    Marketplace service: products, orders, promo codes.
+
+    Authorization: every endpoint except `/health` and `/auth/*` requires
+    `Authorization: Bearer <access_token>`. The JWT carries the user role in the
+    `role` claim (`USER`, `SELLER`, `ADMIN`). Missing/invalid token -> `401 TOKEN_INVALID`,
+    expired token -> `401 TOKEN_EXPIRED`, insufficient role -> `403 ACCESS_DENIED`.
+
+    All errors share the `ErrorResponse` format.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+  /auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      security: []
+      description: Registers a USER or SELLER. ADMIN accounts cannot be self-registered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/UserAlreadyExists' }
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+  /auth/refresh:
+    post:
+      operationId: refresh
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Refreshed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/RefreshInvalid' }
+  /products:
+    get:
+      operationId: listProducts
+      tags: [products]
+      description: 'Roles: USER, SELLER, ADMIN - all products.'
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Size' }
+        - in: query
+          name: status
+          schema: { $ref: '#/components/schemas/ProductStatus' }
+        - in: query
+          name: category
+          description: Exact match.
+          schema: { type: string, minLength: 1, maxLength: 100 }
+      responses:
+        '200':
+          description: Product page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductPage' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createProduct
+      tags: [products]
+      description: |
+        Roles: SELLER - creates a product owned by itself (`seller_id` must be omitted or equal to the caller);
+        ADMIN - may set any existing `seller_id` (defaults to itself); USER - `403 ACCESS_DENIED`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+  /products/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      operationId: getProduct
+      tags: [products]
+      description: 'Roles: USER, SELLER, ADMIN - any product.'
+      responses:
+        '200':
+          description: Product
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+    put:
+      operationId: updateProduct
+      tags: [products]
+      description: 'Roles: SELLER - only own products; ADMIN - any product; USER - `403 ACCESS_DENIED`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+    delete:
+      operationId: deleteProduct
+      tags: [products]
+      description: |
+        Soft delete: the product status becomes `ARCHIVED`, the row is kept.
+        Roles: SELLER - only own products; ADMIN - any product; USER - `403 ACCESS_DENIED`.
+      responses:
+        '204': { description: Archived }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+  /orders:
+    post:
+      operationId: createOrder
+      tags: [orders]
+      description: |
+        Roles: USER, ADMIN; SELLER - `403 ACCESS_DENIED`.
+        Checks in order: rate limit (`ORDER_LIMIT_EXCEEDED`), active order (`ORDER_HAS_ACTIVE`),
+        catalog (`PRODUCT_NOT_FOUND` / `PRODUCT_INACTIVE`), stock (`INSUFFICIENT_STOCK`),
+        promo code (`PROMO_CODE_INVALID` / `PROMO_CODE_MIN_AMOUNT`).
+        Stock reservation and order creation run in a single transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/ProductNotFound' }
+        '409': { $ref: '#/components/responses/OrderConflict' }
+        '422': { $ref: '#/components/responses/PromoError' }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      operationId: getOrder
+      tags: [orders]
+      description: 'Roles: USER - only own orders (`403 ORDER_OWNERSHIP_VIOLATION`); ADMIN - any order; SELLER - `403 ACCESS_DENIED`.'
+      responses:
+        '200':
+          description: Order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/OrderForbidden' }
+        '404': { $ref: '#/components/responses/OrderNotFound' }
+    put:
+      operationId: updateOrder
+      tags: [orders]
+      description: |
+        Roles: USER - only own orders (`403 ORDER_OWNERSHIP_VIOLATION`); ADMIN - any order; SELLER - `403 ACCESS_DENIED`.
+        Allowed only in state `CREATED`. Previous stock is returned, new items are checked and reserved,
+        totals and promo discount are recalculated (promo is dropped if no longer applicable). Single transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/OrderForbidden' }
+        '404': { $ref: '#/components/responses/OrderOrProductNotFound' }
+        '409': { $ref: '#/components/responses/OrderConflict' }
+        '429': { $ref: '#/components/responses/RateLimit' }
+  /orders/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      operationId: cancelOrder
+      tags: [orders]
+      description: |
+        Roles: USER - only own orders (`403 ORDER_OWNERSHIP_VIOLATION`); ADMIN - any order; SELLER - `403 ACCESS_DENIED`.
+        Allowed only from `CREATED` or `PAYMENT_PENDING`. Returns stock and promo usage. Single transaction.
+      responses:
+        '200':
+          description: Canceled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/OrderForbidden' }
+        '404': { $ref: '#/components/responses/OrderNotFound' }
+        '409': { $ref: '#/components/responses/InvalidStateTransition' }
+  /promo-codes:
+    post:
+      operationId: createPromoCode
+      tags: [promo-codes]
+      description: 'Roles: SELLER, ADMIN; USER - `403 ACCESS_DENIED`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromoCodeCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromoCodeResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '409': { $ref: '#/components/responses/PromoCodeExists' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from `/auth/login`. Claims `sub` (user id), `role`, `type=access`.
+  parameters:
+    Page:
+      in: query
+      name: page
+      description: Page number, starting from 0.
+      schema: { type: integer, minimum: 0, default: 0 }
+    Size:
+      in: query
+      name: size
+      description: Page size.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    ProductId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+    OrderId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string }
+    ProductStatus:
+      type: string
+      enum: [ACTIVE, INACTIVE, ARCHIVED]
+    ProductCreate:
+      type: object
+      required: [name, price, stock, category, status]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string, maxLength: 4000, nullable: true }
+        price: { type: number, format: decimal, x-go-type: float64, minimum: 0.01, maximum: 9999999999.99, description: 'Price, > 0, 2 decimal places.' }
+        stock: { type: integer, minimum: 0, maximum: 2147483647 }
+        category: { type: string, minLength: 1, maxLength: 100 }
+        status: { $ref: '#/components/schemas/ProductStatus' }
+        seller_id: { type: string, format: uuid, nullable: true, description: 'Only ADMIN may set another seller.' }
+    ProductUpdate:
+      type: object
+      required: [name, price, stock, category, status]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+        description: { type: string, maxLength: 4000, nullable: true }
+        price: { type: number, format: decimal, x-go-type: float64, minimum: 0.01, maximum: 9999999999.99 }
+        stock: { type: integer, minimum: 0, maximum: 2147483647 }
+        category: { type: string, minLength: 1, maxLength: 100 }
+        status: { $ref: '#/components/schemas/ProductStatus' }
+    ProductResponse:
+      type: object
+      required: [id, name, price, stock, category, status, seller_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        price: { type: number, format: decimal, x-go-type: float64 }
+        stock: { type: integer }
+        category: { type: string }
+        status: { $ref: '#/components/schemas/ProductStatus' }
+        seller_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ProductPage:
+      type: object
+      required: [items, totalElements, page, size]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProductResponse' } }
+        totalElements: { type: integer, format: int64, minimum: 0 }
+        page: { type: integer, minimum: 0 }
+        size: { type: integer, minimum: 1 }
+    OrderItem:
+      type: object
+      required: [product_id, quantity]
+      properties:
+        product_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 1, maximum: 999 }
+    OrderCreate:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/OrderItem' } }
+        promo_code: { type: string, pattern: '^[A-Z0-9_]{4,20}$', nullable: true }
+    OrderUpdate:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/OrderItem' } }
+    OrderItemResponse:
+      type: object
+      required: [id, product_id, quantity, price_at_order]
+      properties:
+        id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        quantity: { type: integer }
+        price_at_order: { type: number, format: decimal, x-go-type: float64, description: Unit price snapshot at order time. }
+    OrderResponse:
+      type: object
+      required: [id, user_id, status, items, total_amount, discount_amount, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        promo_code: { type: string, nullable: true }
+        total_amount: { type: number, format: decimal, x-go-type: float64, description: Amount after discount. }
+        discount_amount: { type: number, format: decimal, x-go-type: float64 }
+        items: { type: array, items: { $ref: '#/components/schemas/OrderItemResponse' } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    OrderStatus:
+      type: string
+      description: 'CREATED -> PAYMENT_PENDING -> PAID -> SHIPPED -> COMPLETED; CREATED/PAYMENT_PENDING -> CANCELED.'
+      enum: [CREATED, PAYMENT_PENDING, PAID, SHIPPED, COMPLETED, CANCELED]
+    DiscountType:
+      type: string
+      enum: [PERCENTAGE, FIXED_AMOUNT]
+    PromoCodeCreate:
+      type: object
+      required: [code, discount_type, discount_value, min_order_amount, max_uses, valid_from, valid_until]
+      properties:
+        code: { type: string, pattern: '^[A-Z0-9_]{4,20}$' }
+        discount_type: { $ref: '#/components/schemas/DiscountType' }
+        discount_value: { type: number, format: decimal, x-go-type: float64, minimum: 0.01, maximum: 9999999999.99, description: 'Percent (<= 100) for PERCENTAGE, amount for FIXED_AMOUNT.' }
+        min_order_amount: { type: number, format: decimal, x-go-type: float64, minimum: 0, maximum: 9999999999.99 }
+        max_uses: { type: integer, minimum: 1, maximum: 2147483647 }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time, description: Must be >= valid_from. }
+        active: { type: boolean, default: true }
+    PromoCodeResponse:
+      type: object
+      required: [id, code, discount_type, discount_value, min_order_amount, max_uses, current_uses, valid_from, valid_until, active]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        discount_type: { $ref: '#/components/schemas/DiscountType' }
+        discount_value: { type: number, format: decimal, x-go-type: float64 }
+        min_order_amount: { type: number, format: decimal, x-go-type: float64 }
+        max_uses: { type: integer }
+        current_uses: { type: integer }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        active: { type: boolean }
+    UserRole:
+      type: string
+      enum: [USER, SELLER, ADMIN]
+    RegisterRequest:
+      type: object
+      required: [email, password, role]
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        password: { type: string, minLength: 8, maxLength: 72 }
+        role: { type: string, enum: [USER, SELLER] }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        password: { type: string, minLength: 1, maxLength: 72 }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string, minLength: 1 }
+    AuthResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Access token lifetime in seconds. }
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_ERROR
+        - TOKEN_INVALID
+        - TOKEN_EXPIRED
+        - REFRESH_TOKEN_INVALID
+        - INVALID_CREDENTIALS
+        - USER_ALREADY_EXISTS
+        - ACCESS_DENIED
+        - PRODUCT_NOT_FOUND
+        - PRODUCT_INACTIVE
+        - ORDER_NOT_FOUND
+        - ORDER_LIMIT_EXCEEDED
+        - ORDER_HAS_ACTIVE
+        - INVALID_STATE_TRANSITION
+        - INSUFFICIENT_STOCK
+        - PROMO_CODE_INVALID
+        - PROMO_CODE_MIN_AMOUNT
+        - PROMO_CODE_EXISTS
+        - ORDER_OWNERSHIP_VIOLATION
+        - NOT_FOUND
+        - INTERNAL_ERROR
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code: { $ref: '#/components/schemas/ErrorCode' }
+        message: { type: string }
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            VALIDATION_ERROR: `{"fields": [{"field": "price", "reason": "..."}]}`;
+            INSUFFICIENT_STOCK: `{"items": [{"product_id": "...", "requested": 5, "available": 2}]}`;
+            PRODUCT_NOT_FOUND / PRODUCT_INACTIVE: `{"product_id": "..."}`.
+  responses:
+    ValidationError:
+      description: '`VALIDATION_ERROR` - request does not match the contract; `details.fields` lists violations.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Unauthorized:
+      description: '`TOKEN_INVALID` (missing/malformed/invalid access token) or `TOKEN_EXPIRED`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    InvalidCredentials:
+      description: '`INVALID_CREDENTIALS` - wrong email or password.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    RefreshInvalid:
+      description: '`REFRESH_TOKEN_INVALID` - refresh token is invalid or expired.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    UserAlreadyExists:
+      description: '`USER_ALREADY_EXISTS` - email is already registered.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    AccessDenied:
+      description: '`ACCESS_DENIED` - role is not allowed or a SELLER touches a foreign product.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    OrderForbidden:
+      description: '`ACCESS_DENIED` (role not allowed) or `ORDER_OWNERSHIP_VIOLATION` (order belongs to another user).'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    ProductNotFound:
+      description: '`PRODUCT_NOT_FOUND`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    OrderNotFound:
+      description: '`ORDER_NOT_FOUND`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    OrderOrProductNotFound:
+      description: '`ORDER_NOT_FOUND` or `PRODUCT_NOT_FOUND`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    OrderConflict:
+      description: '`ORDER_HAS_ACTIVE`, `PRODUCT_INACTIVE`, `INSUFFICIENT_STOCK` or `INVALID_STATE_TRANSITION`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    InvalidStateTransition:
+      description: '`INVALID_STATE_TRANSITION`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PromoError:
+      description: '`PROMO_CODE_INVALID` (not found, expired, exhausted, inactive) or `PROMO_CODE_MIN_AMOUNT`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    PromoCodeExists:
+      description: '`PROMO_CODE_EXISTS` - promo code with this code already exists.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    RateLimit:
+      description: '`ORDER_LIMIT_EXCEEDED` - too frequent order create/update.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
