@@ -1,0 +1,160 @@
+name: flight-booking
+
+x-flight-api-key: &flight-api-key ${FLIGHT_SERVICE_API_KEY:-dev-flight-service-api-key}
+
+x-redis-sentinel: &redis-sentinel
+  image: redis:7.4-alpine
+  command:
+    - sh
+    - -c
+    - |
+      cat > /tmp/sentinel.conf <<'CONF'
+      port 26379
+      sentinel monitor mymaster 172.30.0.10 6379 2
+      sentinel down-after-milliseconds mymaster 5000
+      sentinel failover-timeout mymaster 15000
+      sentinel parallel-syncs mymaster 1
+      CONF
+      exec redis-sentinel /tmp/sentinel.conf
+  depends_on:
+    redis-master:
+      condition: service_healthy
+    redis-replica:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+    interval: 2s
+    timeout: 2s
+    retries: 15
+
+services:
+  flight-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: flights
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: flight
+    volumes:
+      - flight-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flight -d flights"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  booking-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: bookings
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+    volumes:
+      - booking-db-data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking -d bookings"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis-master:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis-replica:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--replicaof", "172.30.0.10", "6379"]
+    networks:
+      default:
+        ipv4_address: 172.30.0.11
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  redis-sentinel-1: *redis-sentinel
+  redis-sentinel-2: *redis-sentinel
+  redis-sentinel-3: *redis-sentinel
+
+  flight-service:
+    build:
+      context: .
+      args:
+        SERVICE: flight-service
+    environment:
+      GRPC_ADDR: ":50051"
+      DATABASE_URL: postgres://flight:flight@flight-db:5432/flights?sslmode=disable
+      FLIGHT_SERVICE_API_KEY: *flight-api-key
+      REDIS_MASTER_NAME: mymaster
+      REDIS_ADDRS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_OP_TIMEOUT: 300ms
+      CACHE_TTL: 5m
+    ports:
+      - "50051:50051"
+    depends_on:
+      flight-db:
+        condition: service_healthy
+      redis-sentinel-1:
+        condition: service_healthy
+      redis-sentinel-2:
+        condition: service_healthy
+      redis-sentinel-3:
+        condition: service_healthy
+    restart: unless-stopped
+
+  booking-service:
+    build:
+      context: .
+      args:
+        SERVICE: booking-service
+    environment:
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://booking:booking@booking-db:5432/bookings?sslmode=disable
+      FLIGHT_SERVICE_ADDR: flight-service:50051
+      FLIGHT_SERVICE_API_KEY: *flight-api-key
+      RETRY_MAX_ATTEMPTS: 3
+      RETRY_INITIAL_BACKOFF: 100ms
+      RETRY_ATTEMPT_TIMEOUT: 2s
+      CB_FAILURE_THRESHOLD: 5
+      CB_WINDOW: 30s
+      CB_OPEN_TIMEOUT: 15s
+    ports:
+      - "8080:8080"
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      flight-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
+          gateway: 172.30.0.1
+
+volumes:
+  flight-db-data:
+  booking-db-data:
