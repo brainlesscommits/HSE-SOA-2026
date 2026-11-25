@@ -1,0 +1,208 @@
+{
+  "uid": "cinema-analytics-dashboard",
+  "title": "Online Cinema Analytics",
+  "tags": [
+    "cinema",
+    "clickhouse",
+    "analytics"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-14d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Retention Cohort Heatmap (Day 0 - Day 7, %)",
+      "description": "Когортный анализ возвращаемости пользователей по дате первого просмотра (из агрегированной таблицы analytics.retention_cohorts)",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "sql",
+          "format": 1,
+          "rawSql": "SELECT toString(cohort_date) AS `Когорта`, max(cohort_size) AS `Размер когорты`, round(maxIf(retention_rate, day_number = 0) * 100, 1) AS `Day 0`, round(maxIf(retention_rate, day_number = 1) * 100, 1) AS `Day 1`, round(maxIf(retention_rate, day_number = 2) * 100, 1) AS `Day 2`, round(maxIf(retention_rate, day_number = 3) * 100, 1) AS `Day 3`, round(maxIf(retention_rate, day_number = 4) * 100, 1) AS `Day 4`, round(maxIf(retention_rate, day_number = 5) * 100, 1) AS `Day 5`, round(maxIf(retention_rate, day_number = 6) * 100, 1) AS `Day 6`, round(maxIf(retention_rate, day_number = 7) * 100, 1) AS `Day 7` FROM analytics.retention_cohorts FINAL GROUP BY cohort_date ORDER BY cohort_date DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Когорта"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "string"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Размер когорты"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "DAU (Daily Active Users)",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "sql",
+          "format": 0,
+          "rawSql": "SELECT toDateTime(metric_date) AS time, dau AS `DAU` FROM analytics.daily_metrics FINAL ORDER BY metric_date ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "View Conversion (%) & Average Watch Time (s)",
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "sql",
+          "format": 0,
+          "rawSql": "SELECT toDateTime(metric_date) AS time, round(view_conversion * 100, 2) AS `Conversion (%)`, round(avg_watch_seconds, 1) AS `Avg Watch (sec)` FROM analytics.daily_metrics FINAL ORDER BY metric_date ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 6
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Top Movies by Views",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 14,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "sql",
+          "format": 1,
+          "rawSql": "SELECT movie_id AS `Фильм`, sum(views_count) AS `Просмотров (STARTED)`, sum(finished_count) AS `Досмотров (FINISHED)`, round(avg(avg_progress_seconds), 1) AS `Ср. прогресс (сек)` FROM analytics.daily_top_movies FINAL GROUP BY movie_id ORDER BY `Просмотров (STARTED)` DESC LIMIT 10"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "piechart",
+      "title": "Events Distribution by Device Type",
+      "gridPos": {
+        "x": 14,
+        "y": 17,
+        "w": 10,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "sql",
+          "format": 1,
+          "rawSql": "SELECT device_type AS `Device`, sum(events_count) AS `Events` FROM analytics.daily_device_stats FINAL GROUP BY device_type ORDER BY `Events` DESC"
+        }
+      ]
+    }
+  ]
+}
